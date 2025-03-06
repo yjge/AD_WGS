@@ -1,0 +1,79 @@
+##REGENIE Step1
+
+#!/bin/bash
+regenie \
+--step 1 \
+--bed ukb_cal_allChrs_hg38 \
+--extract qc_pass.snplist \
+--phenoFile ${phenotype}.txt \
+--covarFile ${phenotype}_cov.txt \
+--catCovarList male,batch,center_Vanguard,center_SC,center_DECODE \
+--maxCatLevels 26 \
+--bt \
+--bsize 1000 \
+--threads 120 \
+--lowmem \
+--lowmem-prefix  ${phenotype}_tmp_preds \
+--out ${phenotype}
+
+
+##REGENIE Step2
+
+#!/bin/bash
+for chr in {1..22}; do
+regenie \
+--step 2 \
+--chr ${chr} \
+--bed Q0_unre_Caucasian_c${chr} \
+--phenoFile ${phenotype}.txt \
+--covarFile ${phenotype}_cov.txt \
+--catCovarList male,batch,center_Vanguard,center_SC,center_DECODE \
+--maxCatLevels 26 \
+--pred ${phenotype}_pred.list \
+--bt \
+--firth --approx \
+--firth-se \
+--pThresh 0.999 \
+--minMAC 20 \
+--bsize 1000 \
+--threads 120 \
+--write-samples \
+--print-pheno \
+--out ${phenotype}_chr${chr}
+done
+
+
+#!/bin/bash
+for genebased in PTV Missense Synonymous UTR_3 UTR_5 Upstream Downstream; do
+  for chr in {1..22}; do
+    regenie \
+    --step 2 \
+    --chr ${chr} \
+    --bed Q0_unre_Caucasian_c${chr} \
+    --phenoFile ${phenotype}.txt \
+    --covarFile ${phenotype}_cov.txt \
+    --catCovarList male,batch,center_Vanguard,center_SC,center_DECODE \
+    --maxCatLevels 26 \
+    --pred ${phenotype}_pred.list \
+    --anno-file ${genebased}_chr${chr}.txt \
+    --set-list chr${chr}_${genebased}.setlist \
+    --mask-def Mask_${genebased}.txt \
+    --aaf-bins 0.01 \
+    --vc-tests skato,acato-full \
+    --vc-maxAAF 0.01 \
+    --check-burden-files \
+    --write-mask \
+    --bt \
+    --firth --approx \
+    --firth-se \
+    --pThresh 0.999 \
+    --bsize 200 \
+    --threads 120 \
+    --minMAC 1 \
+    --write-samples \
+    --write-mask-snplist \
+    --print-pheno \
+    --out ${phenotype}_chr${chr}_${genebased}
+  done
+done
+

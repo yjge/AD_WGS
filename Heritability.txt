@@ -1,0 +1,57 @@
+#Step 1
+for i in {1..22};
+do
+gcta \
+--bfile chr${i} \
+--ld-score-region 200 \
+--ld-wind 1000 \
+--threads 64 \
+--out chr${i} \
+;done
+
+#Step 2
+library(data.table)
+library(tidyverse)
+lds_seg<-as.data.frame(fread("full_score.ld"))
+lds_seg<-lds_seg[,c(1,8,4)]
+maf_list <- list()
+maf_list[[1]] <- subset(lds_seg, lds_seg$freq >= 0.1)
+maf_list[[2]] <- subset(lds_seg, lds_seg$freq < 0.1 & lds_seg$freq >= 0.01)
+maf_list[[3]] <- subset(lds_seg, lds_seg$freq < 0.01 & lds_seg$freq >= 0.001)
+maf_list[[4]] <- subset(lds_seg, lds_seg$freq < 0.001)
+for (i in 1:length(maf_list)) {
+  maf_data <- maf_list[[i]]
+  if (nrow(maf_data) > 0) { 
+    quartiles <- summary(maf_data$ldscore_SNP)
+    lb1 <- which(maf_data$ldscore_SNP <= quartiles[3])
+    lb2 <- which(maf_data$ldscore_SNP > quartiles[3]) 
+    lb1_snp <- maf_data$SNP[lb1]
+    lb2_snp <- maf_data$SNP[lb2]
+    write.table(lb1_snp, paste0("maf", i, "_ld1_snplist.txt"), row.names = F, quote = F, col.names = F)
+    write.table(lb2_snp, paste0("maf", i, "_ld2_snplist.txt"), row.names = F, quote = F, col.names = F)
+  }
+}
+
+
+#Step3
+#!/bin/bash
+for i in {1..40};
+do
+gcta \
+--mbfile plink_file.txt \
+--make-grm-alg 1 \
+--make-grm-part 40 ${i} \
+--threads 128 \
+--extract maf4_ld2_snplist.txt \
+--out maf4_ld2 \
+;done
+
+#Step4
+#!/bin/bash
+gcta \
+--HEreg \
+--mgrm mgrm.list \
+--pheno ${phenotype}.txt \
+--qcovar ${phenotype}_qcovar.txt \
+--covar ${phenotype}_covar.txt \
+--out ${phenotype}_h2
