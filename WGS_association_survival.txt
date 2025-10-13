@@ -77,7 +77,6 @@ for genebased in PTV Missense Synonymous UTR_3 UTR_5 Upstream Downstream; do
     --pThresh 0.999 \
     --bsize 200 \
     --threads 120 \
-    --minMAC 1 \
     --write-samples \
     --write-mask-snplist \
     --print-pheno \
