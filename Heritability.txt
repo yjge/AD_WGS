@@ -1,57 +1,224 @@
-#Step 1
-for i in {1..22};
-do
+# MPH Heritability
+# Wainschtein, P., Zhang, Y., Schwartzentruber, J. et al.
+# Estimation and mapping of the missing heritability of human phenotypes.
+# Nature (2025). https://doi.org/10.1038/s41586-025-09720-6
+# MPH documentation: https://jiang18.github.io/mph/
+
+#================================== STEP 1: LD score calculation ==================================
+# 1.1 Filter variants by MAF to reduce PLINK bed file size before LD score computation
+#!/bin/bash
+chr=21
+plink2 \
+--bfile Q0_unre_Caucasian_c${chr} \
+--make-bed \
+--geno 0.10 --mind 0.05 --hwe 1e-30 \
+--maf 0.0001 \
+--out chr${chr}
+
+# 1.2 LD score calculation using GCTA
+#!/bin/bash
+chr=21
 gcta \
---bfile chr${i} \
+--bfile chr${chr} \
 --ld-score-region 200 \
 --ld-wind 1000 \
 --threads 64 \
---out chr${i} \
-;done
+--out chr${chr}
 
-#Step 2
-library(data.table)
-library(tidyverse)
-lds_seg<-as.data.frame(fread("full_score.ld"))
-lds_seg<-lds_seg[,c(1,8,4)]
-maf_list <- list()
-maf_list[[1]] <- subset(lds_seg, lds_seg$freq >= 0.1)
-maf_list[[2]] <- subset(lds_seg, lds_seg$freq < 0.1 & lds_seg$freq >= 0.01)
-maf_list[[3]] <- subset(lds_seg, lds_seg$freq < 0.01 & lds_seg$freq >= 0.001)
-maf_list[[4]] <- subset(lds_seg, lds_seg$freq < 0.001)
-for (i in 1:length(maf_list)) {
-  maf_data <- maf_list[[i]]
-  if (nrow(maf_data) > 0) { 
-    quartiles <- summary(maf_data$ldscore_SNP)
-    lb1 <- which(maf_data$ldscore_SNP <= quartiles[3])
-    lb2 <- which(maf_data$ldscore_SNP > quartiles[3]) 
-    lb1_snp <- maf_data$SNP[lb1]
-    lb2_snp <- maf_data$SNP[lb2]
-    write.table(lb1_snp, paste0("maf", i, "_ld1_snplist.txt"), row.names = F, quote = F, col.names = F)
-    write.table(lb2_snp, paste0("maf", i, "_ld2_snplist.txt"), row.names = F, quote = F, col.names = F)
+# 1.3 Merge LD score files across chromosomes
+cat *.score.ld > full_score.ld.temp
+awk '!x[$0]++' full_score.ld.temp > allChr.score.ld
+rm full_score.ld.temp
+
+#================================== STEP 2: MAF and LD stratification ==================================
+# To compute MAF- and LD-partitioned GRMs, each variant is assigned to one of four MAF bins
+# (10–50%, 1–10%, 0.1–1%, 0.01–0.1%), and further split into low- and high-LD bins
+# based on the median LD score within each MAF bin.
+# The final output is a snp_info file required by MPH.
+python 
+# -*- coding: utf-8 -*-
+import pandas as pd
+ldFilePath = "allChr.score.ld"
+savePath   = "snp_info.csv"
+# 2.1 Read LD score file and keep only relevant columns
+lds_seg = pd.read_csv(
+  ldFilePath,
+  delim_whitespace=True,
+  usecols=["SNP", "ldscore_SNP", "freq"],
+  dtype={
+    "SNP": str,
+    "ldscore_SNP": float,
+    "freq": float
   }
-}
+)
+# 2.2 Split variants into MAF bins
+maf1 = lds_seg[lds_seg["freq"] >= 0.1]
+maf2 = lds_seg[(lds_seg["freq"] < 0.1) & (lds_seg["freq"] >= 0.01)]
+maf3 = lds_seg[(lds_seg["freq"] < 0.01) & (lds_seg["freq"] >= 0.001)]
+maf4 = lds_seg[lds_seg["freq"] < 0.001]
+# 2.3 Within each MAF bin, split variants by the median LD score
+def split_ld(df):
+  if df.empty:
+  return pd.Series([], dtype=str), pd.Series([], dtype=str)
+median_ld = df["ldscore_SNP"].median()
+ld1 = df[df["ldscore_SNP"] <= median_ld]["SNP"]
+ld2 = df[df["ldscore_SNP"] > median_ld]["SNP"]
+return ld1, ld2
+maf1_ld1, maf1_ld2 = split_ld(maf1)
+maf2_ld1, maf2_ld2 = split_ld(maf2)
+maf3_ld1, maf3_ld2 = split_ld(maf3)
+maf4_ld1, maf4_ld2 = split_ld(maf4)
+# 2.4 Combine all SNPs across strata and remove duplicates
+all_snps = pd.concat([
+  maf1_ld1, maf1_ld2,
+  maf2_ld1, maf2_ld2,
+  maf3_ld1, maf3_ld2,
+  maf4_ld1, maf4_ld2
+]).drop_duplicates().reset_index(drop=True)
+snp_info = pd.DataFrame({'SNP': all_snps})
+all_snps = pd.concat([maf1_ld1, maf1_ld2, maf2_ld1, maf2_ld2,
+                      maf3_ld1, maf3_ld2, maf4_ld1, maf4_ld2]).drop_duplicates().reset_index(drop=True)
+all_snps = pd.DataFrame({'SNP': all_snps})
+# 2.5 Initialize SNP info table with empty indicator columns
+snp_info = all_snps.copy()
+for col in ['maf1_ld1','maf1_ld2','maf2_ld1','maf2_ld2','maf3_ld1','maf3_ld2','maf4_ld1','maf4_ld2']:
+  snp_info[col] = ''
+# 2.6 Mark SNP membership in each MAF–LD stratum
+def mark_snps(snp_list, col_name):
+  snp_info.loc[snp_info['SNP'].isin(snp_list), col_name] = 1
+mark_snps(maf1_ld1, 'maf1_ld1')
+mark_snps(maf1_ld2, 'maf1_ld2')
+mark_snps(maf2_ld1, 'maf2_ld1')
+mark_snps(maf2_ld2, 'maf2_ld2')
+mark_snps(maf3_ld1, 'maf3_ld1')
+mark_snps(maf3_ld2, 'maf3_ld2')
+mark_snps(maf4_ld1, 'maf4_ld1')
+mark_snps(maf4_ld2, 'maf4_ld2')
+# 2.7 Save SNP annotation file
+snp_info.to_csv(savePath, index=False)
 
 
-#Step3
+#================================== STEP 3: Construction of MPH GRMs ==================================
+# 3.1 Merge all chromosomes
+# MPH currently supports only a single PLINK bfile as input.
+# Given the large sample size (~350k), bfiles are first converted to pfiles
+# to reduce memory usage during merging.
+ls chr*.bed | grep -v split | sed 's/\.bed$//' | sort -V > merge_list.txt
+sed -i "s|^|$(pwd)/|" merge_list.txt
+mkdir -p pfile
+cat merge_list.txt | xargs -n 1 -P 3 -I {} bash -c '
+  prefix={}
+  chr=$(basename $prefix)
+  plink2 \
+    --bfile "$prefix" \
+    --make-pgen \
+    --threads 2 \
+    --memory 40000 \
+    --out "pfile/$chr"
+'
+
+# 3.2 Merge pfiles across chromosomes
+cd pfile
+ls chr*.pgen | sed 's/\.pgen$//' | sort -V > pmerge_list.txt
+sed -i "s|^|$(pwd)/|" pmerge_list.txt
 #!/bin/bash
-for i in {1..40};
+plink2 \
+--pmerge-list pfile/pmerge_list.txt \
+--make-pgen \
+--threads 8 \
+--memory 240000 \
+--out pfile/allChr_merged
+
+# 3.3 Convert merged pfile back to bfile
+plink2 \
+--pfile pfile/allChr_merged \
+--make-bed \
+--threads 8 \
+--memory 240000 \
+--out allChr_merged
+
+# 3.4 Construct MPH GRM for a given MAF–LD stratum
+#!/bin/bash
+mafLevel=1
+ldLevel=1
+mph \
+--make_grm \
+--bfile allChr_merged \
+--min_maf 0 \
+--min_hwe_pval 1e-8 \
+--snp_info snp_info.csv \
+--snp_weight maf${mafLevel}_ld${ldLevel} \
+--num_threads 100 \
+--out maf${mafLevel}_ld${ldLevel}
+
+#================================== STEP 4: Relatedness refinement ==================================
+# Following the Nature paper:
+# A common-variant GRM (MAF > 0.01) is constructed using genotyped SNPs.
+# A sparse GRM is extracted for pairs with genomic relatedness > 0.05,
+# which is then used to define an unrelated sample set.
+
+# 4.1 Extract common variants (MAF > 0.01)
+plink2 \
+--pfile pfile/allChr_merged \
+--maf 0.01 \
+--make-bed \
+--threads 8 \
+--memory 240000 \
+--out allChr_merged_maf_gt_0.01
+
+# 4.2 Construct common-variant GRM using GCTA (split into 10 parts)
+for i in {1..10};
 do
 gcta \
---mbfile plink_file.txt \
+--bfile allChr_merged_maf_gt_0.01 \
 --make-grm-alg 1 \
---make-grm-part 40 ${i} \
---threads 128 \
---extract maf4_ld2_snplist.txt \
---out maf4_ld2 \
+--make-grm-part 10 ${i} \
+--threads 64 \
+--out common_part${i} \
 ;done
 
-#Step4
-#!/bin/bash
+cat common_part*.grm.N.bin > common.grm.N.bin
+cat common_part*.grm.bin > common.grm.bin
+cat common_part*.grm.id > common.grm.id
+
+# 4.3 Identify unrelated individuals using a relatedness cutoff of 0.05
 gcta \
---HEreg \
---mgrm mgrm.list \
---pheno ${phenotype}.txt \
---qcovar ${phenotype}_qcovar.txt \
---covar ${phenotype}_covar.txt \
---out ${phenotype}_h2
+--grm common \
+--grm-cutoff 0.05 \
+--make-grm \
+--threads 64 \
+--out unrelated_cutoff005
+
+awk '{print $2}' \
+unrelated_cutoff005.grm.id \
+> unrelated_cutoff005_iid.txt
+
+# 4.4 Subset MPH GRM to unrelated individuals
+mafLevel=1
+ldLevel=1
+mph \
+--binary_grm_file maf${mafLevel}_ld${ldLevel} \
+--keep unrelated_cutoff005_iid.txt \
+--subset_grm \
+--output_file maf${mafLevel}_ld${ldLevel}
+
+ls *.grm.bin | sed 's/\.grm\.bin$//' | sort \
+| sed "s|^|$(pwd)/|" \
+> grm_list.txt
+
+#================================== STEP 5: REML heritability estimation ==================================
+#!/bin/bash
+pheno="ACD"
+mph \
+--grm_list grm_list.txt \
+--phenotype_file pheno.csv \
+--trait ${pheno} \
+--covariate_file cov.csv \
+--covariate_names ${pheno}_age,male,center_Vanguard,center_SC,center_DECODE,PC1,PC2,PC3,PC4,PC5,PC6,PC7,PC8,PC9,PC10,batch1,batch10,batch11,batch12,batch13,batch14,batch15,batch16,batch17,batch18,batch19,batch2,batch20,batch21,batch22,batch23,batch3,batch4,batch5,batch50,batch6,batch7,batch8,batch9,batch99,batchNA \
+--reml \
+--save_memory \
+--num_threads 32 \
+--output_file ${pheno}
+
+
+
